@@ -1,0 +1,2 @@
+# Python >= 3.10. No third-party packages are required.
+# All runtime dependencies are included in the Python standard library.

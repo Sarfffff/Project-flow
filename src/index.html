@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light"><meta name="description" content="Flow，本地优先的个人项目管理工作空间。">
+<title>Flow · 项目管理工作空间</title>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="./styles.css"><script src="./app.js" defer></script>
+</head>
+<body>
+<div class="space-glow" aria-hidden="true"></div>
+<aside class="sidebar" id="sidebar">
+<a class="brand" href="#overview" aria-label="Flow 总览"><span class="brand-mark"><i></i><i></i><i></i></span><span>flow<span class="brand-dot">.</span></span></a>
+<div class="workspace"><span class="workspace-avatar">W</span><div><strong>我的工作空间</strong><small>PERSONAL WORKSPACE</small></div><span class="local-dot" title="本地工作空间"></span></div>
+<div class="nav-caption">工作空间</div>
+<nav aria-label="主导航">
+<button class="nav-item active" data-nav="overview"><span data-icon="grid"></span>总览<span class="nav-hint">G</span></button>
+<button class="nav-item" data-nav="tasks"><span data-icon="check"></span>全部任务<span class="count" id="nav-task-count">0</span></button>
+<button class="nav-item" data-nav="projects"><span data-icon="folder"></span>项目空间</button>
+<button class="nav-item" data-nav="insights"><span data-icon="chart"></span>数据洞察</button>
+</nav>
+<div class="nav-caption project-caption">我的项目<button class="icon-btn" data-action="new-project" aria-label="新建项目" title="新建项目"><span data-icon="plus"></span></button></div>
+<div class="project-nav" id="project-nav"></div>
+<div class="sidebar-bottom"><div class="local-note"><span data-icon="shield"></span><div><strong>本地优先，安心专注</strong><small>数据保存在你的电脑上</small></div></div><div class="bottom-actions"><button class="nav-item" data-nav="settings"><span data-icon="settings"></span>工作空间设置</button><button class="icon-btn theme-toggle" data-action="theme" aria-label="切换浅色主题" title="切换主题"><span data-icon="sun"></span></button></div><div class="profile"><span class="avatar">我</span><div><strong>个人工作空间</strong><small>LESS NOISE. MORE FLOW.</small></div></div></div>
+</aside>
+<div class="main-wrap">
+<header class="topbar"><div class="breadcrumb"><button class="icon-btn mobile-menu" data-action="menu" aria-label="切换导航"><span data-icon="menu"></span></button><span data-icon="home"></span><span>工作空间</span><span class="slash">/</span><strong id="breadcrumb">总览</strong></div><div class="top-actions"><span class="connection" id="connection"><i></i>正在连接</span><button class="icon-btn" data-action="refresh" aria-label="刷新数据" title="刷新数据"><span data-icon="refresh"></span></button><span class="avatar small">我</span></div></header>
+<main id="main"><section class="page-heading"><div><div class="eyebrow" id="eyebrow">YOUR PERSONAL MISSION CONTROL</div><h1 id="page-title">让每个项目，有序发生<span class="accent">。</span></h1><p id="page-description">从一个想法，到每一次完成。把注意力留给真正重要的事。</p></div><div class="heading-actions"><button class="button secondary" data-action="new-project"><span data-icon="folder-plus"></span>新建项目</button><button class="button primary" data-action="new-task"><span data-icon="plus"></span>新建任务<span class="key">N</span></button></div></section>
+<div id="error-banner" class="error-banner" role="alert" hidden></div>
+<div id="content" aria-live="polite"><div class="loading-state"><span class="spinner"></span>正在打开你的工作空间…</div></div>
+<footer class="page-footer"><span><i class="tiny-dot"></i> FLOW · 留出空间，让想法生长</span><span id="footer-date"></span></footer>
+</main></div>
+<dialog id="task-dialog" class="editor-dialog" aria-labelledby="task-dialog-title">
+<form id="task-form"><div class="dialog-head"><div><div class="eyebrow">MAKE IT HAPPEN</div><h2 id="task-dialog-title">新建任务</h2></div><button type="button" class="icon-btn" data-close="task-dialog" aria-label="关闭任务窗口"><span data-icon="x"></span></button></div>
+<div class="form-body"><input type="hidden" name="id"><label>任务名称 <em>*</em><input name="title" placeholder="下一件值得完成的事是什么？" maxlength="160" required autocomplete="off"></label>
+<label>任务描述<textarea name="description" placeholder="写下目标、背景或验收标准，让行动更清晰…" maxlength="10000" rows="3"></textarea></label>
+<div class="form-grid"><label>所属项目<select name="project_id" id="task-project"></select></label><label>负责人 <em>*</em><input name="owner" placeholder="填写负责人" maxlength="80" required autocomplete="off"></label><label>优先级 <em>*</em><select name="priority" required><option value="" disabled>选择优先级</option><option value="low">低优先级</option><option value="medium">中优先级</option><option value="high">高优先级</option><option value="urgent">紧急</option></select></label><label>任务状态<select name="status"><option value="todo">待开始</option><option value="doing">进行中</option><option value="review">待验收</option><option value="done">已完成</option></select></label><label>开始日期<input name="start_date" type="date" max="9999-12-31"></label><label>截止日期<input name="due_date" type="date" max="9999-12-31"></label></div>
+<label class="range-label">完成进度 <output id="progress-output">0%</output><input name="progress" type="range" min="0" max="99" value="0"></label><p class="form-tip">标记为已完成时，进度自动设为 100%。数据保存至本机 SQLite。</p><p id="task-error" class="form-error" role="alert"></p></div>
+<div class="dialog-footer"><button type="button" class="button danger-text" id="delete-task">删除任务</button><div class="push"></div><button type="button" class="button secondary" data-close="task-dialog">取消</button><button type="submit" class="button primary">保存任务<span data-icon="arrow-right"></span></button></div></form>
+</dialog>
+<dialog id="project-dialog" class="editor-dialog compact" aria-labelledby="project-dialog-title"><form id="project-form"><div class="dialog-head"><div><div class="eyebrow">A SPACE FOR YOUR NEXT IDEA</div><h2 id="project-dialog-title">新建项目</h2></div><button type="button" class="icon-btn" data-close="project-dialog" aria-label="关闭项目窗口"><span data-icon="x"></span></button></div><div class="form-body"><input type="hidden" name="id"><label>项目名称 <em>*</em><input name="name" placeholder="给新的旅程起个名字" maxlength="80" required autocomplete="off"></label><label>项目描述<textarea name="description" rows="3" maxlength="2000" placeholder="这个项目将实现什么？"></textarea></label><fieldset class="color-field"><legend>项目标识色</legend><label class="swatch violet"><input type="radio" name="color" value="violet" checked><span></span><b>紫</b></label><label class="swatch blue"><input type="radio" name="color" value="blue"><span></span><b>蓝</b></label><label class="swatch green"><input type="radio" name="color" value="green"><span></span><b>绿</b></label><label class="swatch amber"><input type="radio" name="color" value="amber"><span></span><b>橙</b></label><label class="swatch pink"><input type="radio" name="color" value="pink"><span></span><b>粉</b></label></fieldset><p id="project-error" class="form-error" role="alert"></p></div><div class="dialog-footer"><button type="button" class="button danger-text" id="delete-project">删除项目</button><div class="push"></div><button type="button" class="button secondary" data-close="project-dialog">取消</button><button type="submit" class="button primary">保存项目<span data-icon="arrow-right"></span></button></div></form></dialog>
+<dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-title"><div class="confirm-symbol" data-icon="alert"></div><h2 id="confirm-title">确认操作</h2><p id="confirm-message"></p><form method="dialog" class="confirm-actions"><button class="button secondary" value="cancel">取消</button><button class="button danger" value="confirm">确认</button></form></dialog>
+<div id="toast" class="toast" role="status"></div><input type="file" id="import-file" accept=".json,application/json" hidden>
+</body></html>

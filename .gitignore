@@ -1,0 +1,45 @@
+# Local databases and backups
+/data/
+*.sqlite
+*.sqlite3
+*.db
+*.sqlite-*
+*.sqlite3-*
+*.db-*
+flow-backup*.json
+/backups/
+
+# Third-party tutorial materials retained locally only
+/参考资料/
+/reference-materials/
+
+# Generated files and test output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+/flow-tests-*/
+/tests/flow-api-*/
+/ui-test-data/
+/test-results.txt
+/releases/
+*.log
+*.zip
+
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+.venv/
+venv/
+node_modules/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
