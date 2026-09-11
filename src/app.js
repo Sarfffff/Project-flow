@@ -44,42 +44,51 @@ const scope = () => projectId ? data.tasks.filter(t=>t.project_id===projectId) :
 function percent(tasks) { return tasks.length ? Math.round(tasks.filter(t=>t.status==='done').length/tasks.length*100) : 0; }
 function relativeTime(value) { const delta=Math.max(0,Date.now()-new Date(value).getTime()); if(delta<60000)return '刚刚'; if(delta<3600000)return `${Math.floor(delta/60000)} 分钟前`; if(delta<86400000)return `${Math.floor(delta/3600000)} 小时前`; return new Date(value).toLocaleDateString('zh-CN'); }
 function toast(message) { clearTimeout(toastTimer); $('#toast').textContent=message; $('#toast').classList.add('show'); toastTimer=setTimeout(()=>$('#toast').classList.remove('show'),3800); }
-function setConnection(ok) { $('#connection').classList.toggle('offline',!ok); $('#connection').innerHTML=`<i></i>${ok?'已连接 · 本地存储':'连接中断 · 未同步'}`; }
+function setConnection(ok) { $('#connection').classList.toggle('offline',!ok); $('#connection').innerHTML=`<i></i>${ok?'本地服务已连接':'本地服务未连接'}`; }
 function showError(message) { $('#error-banner').textContent=message; $('#error-banner').hidden=!message; }
 async function load(silent=false) {
   try { const response=await fetch('/api/state',{cache:'no-store'}); if(!response.ok)throw new Error('服务暂时不可用'); const next=await response.json(); if(!Array.isArray(next.tasks)||!Array.isArray(next.projects))throw new Error('返回数据格式异常'); data=next; ready=true;loaded=true; setConnection(true);showError('');render(); if(!silent)toast('数据已刷新'); }
   catch(error) { ready=false;setConnection(false);showError('无法连接本地服务。请启动 Python 服务后重试；未保存的修改不会写入数据库。'); if(!loaded)$('#content').innerHTML=`<div class="empty-state"><div class="empty-orbit">${icon('database')}</div><h3>工作空间暂时离线</h3><p>请检查服务是否运行，然后重新连接。</p><button class="button primary" data-action="refresh">重新连接</button></div>`; }
 }
-async function write(path,method,payload) {
+async function write(path,method,payload,expectedRevision=data.revision) {
   if(!ready)throw new Error('当前未连接数据库，请先刷新重连');
-  const response=await fetch(path,{method,headers:{'Content-Type':'application/json','X-Flow-Request':'1','If-Match':String(data.revision)},body:JSON.stringify(payload)});
+  const response=await fetch(path,{method,headers:{'Content-Type':'application/json','X-Flow-Request':'1','If-Match':String(expectedRevision)},body:JSON.stringify(payload)});
   const result=await response.json();
   if(!response.ok){if(response.status===409)await load(true);throw new Error(result.error||'保存失败');}
   data=result;setConnection(true);render();return result;
 }
 async function operation(fn,message) { if(busy)return;busy=true;try{await fn();if(message)toast(message);}catch(e){toast(e.message||'操作失败，请检查服务连接');}finally{busy=false;} }
-function route(next,ident=null) { section=next;projectId=ident;filters=initialFilters();selection.clear();page=1;$('#sidebar').classList.remove('open');history.replaceState(null,'',`#${ident?'project/'+ident:next}`);if(loaded)render(); }
-function hydrateRoute() {const value=location.hash.slice(1);if(value.startsWith('project/')){section='tasks';projectId=value.slice(8);}else if(['overview','tasks','projects','insights','settings'].includes(value)){section=value;projectId=null;} }
+function routeHash(){const view=section==='tasks'&&mode==='gantt'?'gantt':section;return '#'+(projectId?'project/'+projectId+(view==='tasks'?'':'/'+view):view==='gantt'?'tasks/gantt':view);}
+function route(next,ident=null) {if(next==='gantt'){next='tasks';mode='gantt';}if(next==='overview'&&mode==='gantt')mode='list';section=next;projectId=ident;filters=initialFilters();selection.clear();page=1;window.FlowManagement?.reset();$('#sidebar').classList.remove('open');history.replaceState(null,'',routeHash());if(loaded)render();}
+function hydrateRoute(){const value=location.hash.slice(1);if(value.startsWith('project/')){const parts=value.split('/');section=['overview','tasks','requirements','defects'].includes(parts[2])?parts[2]:'tasks';projectId=parts[1];if(parts[2]==='gantt')mode='gantt';}else if(value==='gantt'||value==='tasks/gantt'){section='tasks';projectId=null;mode='gantt';}else if(['overview','tasks','requirements','defects','projects','insights','settings','github'].includes(value)){section=value;projectId=null;}if(section==='overview'&&mode==='gantt')mode='list';}
 function render() {
   if(projectId&&!data.projects.some(p=>p.id===projectId)){projectId=null;section='tasks';history.replaceState(null,'','#tasks');}
   const project=data.projects.find(p=>p.id===projectId);
-  const names={overview:'总览',tasks:'全部任务',projects:'项目空间',insights:'数据洞察',settings:'工作空间设置'};
-  $('#breadcrumb').textContent=project?.name||names[section];
-  const titles={overview:'让每个项目，有序发生',tasks:'每一小步，都算数',projects:'好想法，值得一个专属空间',insights:'用数据，看见每一步进展',settings:'让工作空间，更适合你'};
-  const desc={overview:'从一个想法，到每一次完成。把注意力留给真正重要的事。',tasks:'收拢所有待办，在清晰的节奏里推进工作。',projects:'让目标有归属，让进度有迹可循。',insights:'所有统计均来自你的真实任务，没有预设数据。',settings:'管理界面主题与数据备份，保持简单、可靠、可控。'};
-  $('#page-title').innerHTML=`${esc(project?.name||titles[section])}<span class="accent">。</span>`;
-  $('#page-description').textContent=project?.description||desc[section];
-  $('#eyebrow').textContent=project?'ONE PROJECT. ONE STEP AT A TIME.':{overview:'YOUR PERSONAL MISSION CONTROL',tasks:'SMALL STEPS. REAL PROGRESS.',projects:'BUILD SOMETHING THAT MATTERS',insights:'PROGRESS, NOT GUESSWORK',settings:'MAKE YOURSELF AT HOME'}[section];
-  $('.heading-actions').hidden=section==='settings';
+  const names={overview:'仪表盘',tasks:'计划管理',gantt:'甘特图',requirements:'需求管理',defects:'缺陷管理',projects:'项目空间',insights:'数据洞察',settings:'工作空间设置',github:'GitHub 工作台'};
+  const workspaceView=['tasks','requirements','defects'].includes(section);
+  $('#breadcrumb').textContent=project?project.name+(workspaceView?' / '+names[section]:''):workspaceView?'项目工作台 / '+names[section]:names[section];
+  const titles={overview:'让每个项目，有序发生',gantt:'把计划，铺在时间线上',requirements:'让每个需求，有清晰的方向',defects:'让每个问题，都得到回应',tasks:'每一小步，都算数',projects:'好想法，值得一个专属空间',insights:'用数据，看见每一步进展',settings:'让工作空间，更适合你',github:'让代码进展，与项目同行'};
+  const desc={overview:'从一个想法，到每一次完成。把注意力留给真正重要的事。',gantt:'用日、周、月尺度查看计划任务，及时调整开始和截止日期。',requirements:'从评审到验收，记录需求背景、优先级与验收条件。',defects:'从复现到关闭，跟进问题严重程度、负责人和验证结果。',tasks:'收拢所有待办，在清晰的节奏里推进工作。',projects:'让目标有归属，让进度有迹可循。',insights:'所有统计均来自你的真实任务，没有预设数据。',settings:'管理界面主题与数据备份，保持简单、可靠、可控。',github:'读取仓库，追踪提交，把每次改动和你的项目联系起来。'};
+  $('#page-title').innerHTML=`${esc(project?.name||(workspaceView?'在一个工作台，推进所有项目':titles[section]))}<span class="accent">。</span>`;
+  $('#page-description').textContent=project?.description||(workspaceView?'计划、需求和缺陷各归其位；列表、看板与甘特图按需切换。':desc[section]);
+  $('#eyebrow').textContent=project?'ONE PROJECT. ONE STEP AT A TIME.':{overview:'YOUR PERSONAL MISSION CONTROL',gantt:'YOUR PLAN. ON A TIMELINE.',requirements:'CLEAR REQUIREMENTS. BETTER DELIVERY.',defects:'TRACK ISSUES. CLOSE THE LOOP.',tasks:'SMALL STEPS. REAL PROGRESS.',projects:'BUILD SOMETHING THAT MATTERS',insights:'PROGRESS, NOT GUESSWORK',settings:'MAKE YOURSELF AT HOME',github:'YOUR CODE. YOUR PROGRESS.'}[section];
+  $('.heading-actions').hidden=['settings','github','tasks','gantt','requirements','defects'].includes(section);
+  const managementNav=$('#management-nav');
+  if(managementNav){managementNav.hidden=!window.FlowManagement||!['tasks','requirements','defects'].includes(section);if(!managementNav.hidden)managementNav.innerHTML=window.FlowManagement.nav();}
   $('#nav-task-count').textContent=data.tasks.filter(t=>t.status!=='done').length;
-  $$('.nav-item[data-nav]').forEach(b=>b.classList.toggle('active',b.dataset.nav===section&&!projectId));
+  $$('.nav-item[data-nav]').forEach(b=>b.classList.toggle('active',(b.dataset.nav===section||b.dataset.nav==='tasks'&&workspaceView)&&!projectId));
   $('#project-nav').innerHTML=data.projects.length?data.projects.map(p=>`<button class="nav-item ${projectId===p.id?'active':''}" data-project="${p.id}" title="${esc(p.name)}"><span class="project-dot ${p.color}"></span><span class="project-name">${esc(p.name)}</span><span class="count">${data.tasks.filter(t=>t.project_id===p.id&&t.status!=='done').length}</span></button>`).join(''):'<div class="nav-empty">为下一个想法，新建一个项目</div>';
   selection=new Set([...selection].filter(id=>data.tasks.some(t=>t.id===id)));
-  if(section==='overview')$('#content').innerHTML=stats(scope())+charts(scope())+tasksSection()+lowerPanels();
+  if(section==='overview')$('#content').innerHTML=stats(scope())+(window.FlowManagement?.summary()||'')+charts(scope())+tasksSection()+lowerPanels();
   if(section==='tasks')$('#content').innerHTML=stats(scope())+tasksSection();
+  if(['requirements','defects'].includes(section))$('#content').innerHTML=window.FlowManagement?.page(section)||'<section class="panel empty-state">请刷新页面加载管理模块。</section>';
   if(section==='projects')$('#content').innerHTML=projectsPage();
   if(section==='insights')$('#content').innerHTML=stats(data.tasks)+charts(data.tasks)+trend()+lowerPanels();
-  if(section==='settings')$('#content').innerHTML=settingsPage();
+  if(section==='settings'){
+    $('#content').innerHTML=settingsPage();
+    window.FlowSettings?.mount();
+  }
+  if(section==='github' && window.FlowGitHub)window.FlowGitHub.mount();
   $('#footer-date').textContent=new Date().toLocaleDateString('zh-CN',{year:'numeric',month:'long',day:'numeric',weekday:'long'});
   updateSelectAll();
 }
@@ -100,8 +109,10 @@ function filtered() {
   return scope().filter(t=>(!q||[t.title,t.description,t.owner,projectOf(t)?.name].join(' ').toLocaleLowerCase().includes(q))&&(!filters.status||t.status===filters.status)&&(!filters.priority||t.priority===filters.priority)&&(!filters.project||(filters.project==='none'?!t.project_id:t.project_id===filters.project))).sort((a,b)=>filters.sort==='due'?(a.due_date||'9999').localeCompare(b.due_date||'9999'):filters.sort==='priority'?rank[a.priority]-rank[b.priority]||b.created_at.localeCompare(a.created_at):b.created_at.localeCompare(a.created_at));
 }
 const option=(value,label,current)=>`<option value="${esc(value)}" ${value===current?'selected':''}>${esc(label)}</option>`;
+function taskViewToggle(){return `<div class="view-toggle" role="group" aria-label="任务视图">${[['list','list','列表'],['board','board','看板'],...(section==='tasks'?[['gantt','chart','甘特图']]:[])].map(([key,ico,label])=>`<button data-mode="${key}" class="${mode===key?'active':''}" aria-pressed="${mode===key}">${icon(ico)}${label}</button>`).join('')}</div>`;}
 function tasksSection() {
-  return `<section class="task-section"><div class="section-heading"><h2>${projectId?'项目任务':section==='overview'?'任务工作台':'任务列表'}<small>${scope().length} 项任务</small></h2><div class="view-toggle" role="group" aria-label="任务视图"><button data-mode="list" class="${mode==='list'?'active':''}" aria-pressed="${mode==='list'}">${icon('list')}列表</button><button data-mode="board" class="${mode==='board'?'active':''}" aria-pressed="${mode==='board'}">${icon('board')}看板</button></div></div><div class="panel"><div class="task-toolbar"><div class="search-field">${icon('search')}<input id="task-search" aria-label="搜索任务" placeholder="搜索任务、负责人…" value="${esc(filters.query)}"></div><select aria-label="筛选状态" data-filter="status">${option('','全部状态',filters.status)}${Object.keys(statusNames).map(k=>option(k,statusNames[k],filters.status)).join('')}</select><select aria-label="筛选优先级" data-filter="priority">${option('','全部优先级',filters.priority)}${Object.keys(priorityNames).map(k=>option(k,priorityNames[k]+'优先级',filters.priority)).join('')}</select>${projectId?'':`<select aria-label="筛选项目" data-filter="project">${option('','全部项目',filters.project)}${option('none','未分配项目',filters.project)}${data.projects.map(p=>option(p.id,p.name,filters.project)).join('')}</select>`}<span class="toolbar-spacer"></span><select aria-label="排序方式" data-filter="sort">${option('newest','最新创建',filters.sort)}${option('due','截止时间',filters.sort)}${option('priority','优先级',filters.sort)}</select><button class="button secondary small" data-action="export">${icon('download')}备份</button></div><div id="task-results">${taskResults()}</div></div></section>`;
+  if(mode==='gantt'&&section==='tasks'&&window.FlowManagement)return `<section class="task-section"><div class="section-heading"><h2>${projectId?'项目计划任务':'计划任务管理'}<small>${scope().length} 项任务</small></h2><div class="management-section-actions">${taskViewToggle()}<button class="button primary small" data-action="new-task">${icon('plus')}新增任务</button></div></div><div id="gantt-view">${window.FlowManagement.gantt(true)}</div></section>`;
+  return `<section class="task-section"><div class="section-heading"><h2>${projectId?'项目计划任务':section==='overview'?'任务工作台':'计划任务管理'}<small>${scope().length} 项任务</small></h2><div class="management-section-actions">${taskViewToggle()}<button class="button primary small" data-action="new-task">${icon('plus')}新增任务</button></div></div><div class="panel"><div class="task-toolbar"><div class="search-field">${icon('search')}<input id="task-search" aria-label="搜索任务" placeholder="搜索任务、负责人…" value="${esc(filters.query)}"></div><select aria-label="筛选状态" data-filter="status">${option('','全部状态',filters.status)}${Object.keys(statusNames).map(k=>option(k,statusNames[k],filters.status)).join('')}</select><select aria-label="筛选优先级" data-filter="priority">${option('','全部优先级',filters.priority)}${Object.keys(priorityNames).map(k=>option(k,priorityNames[k]+'优先级',filters.priority)).join('')}</select>${projectId?'':`<select aria-label="筛选项目" data-filter="project">${option('','全部项目',filters.project)}${option('none','未分配项目',filters.project)}${data.projects.map(p=>option(p.id,p.name,filters.project)).join('')}</select>`}<span class="toolbar-spacer"></span><select aria-label="排序方式" data-filter="sort">${option('newest','最新创建',filters.sort)}${option('due','截止时间',filters.sort)}${option('priority','优先级',filters.sort)}</select><button class="button secondary small" data-action="export">${icon('download')}备份</button></div><div id="task-results">${taskResults()}</div></div></section>`;
 }
 function taskResults() {
   const tasks=filtered(),pages=Math.max(1,Math.ceil(tasks.length/pageSize));page=Math.min(page,pages);
@@ -110,11 +121,11 @@ function taskResults() {
   const selected=selection.size;
   const bulk=selected?`<div class="bulk-bar"><span>已选 ${selected} 项</span><select id="bulk-status" aria-label="批量状态"><option value="">设置状态…</option>${Object.keys(statusNames).map(k=>option(k,statusNames[k],'')).join('')}</select><button class="button danger-text small" data-action="bulk-delete">删除所选</button><button class="filter-clear" data-action="clear-selection">取消选择</button></div>`:'';
   const shown=tasks.slice((page-1)*pageSize,page*pageSize);
-  return bulk+(mode==='board'?board(tasks):`<div class="table-wrap"><table><thead><tr><th><input id="select-all" type="checkbox" aria-label="选择本页全部任务"></th><th class="task-title-cell">任务名称</th><th class="owner-col">负责人</th><th class="priority-col">优先级</th><th class="status-col">状态</th><th class="progress-col">进度</th><th class="date-col">截止日期</th><th class="action-col"><span class="sr-only">操作</span></th></tr></thead><tbody>${shown.map(taskRow).join('')}</tbody></table></div>`)+`<div class="table-bottom"><span>共 ${tasks.length} 项${hasFilter?' · 已筛选':''} · ${mode==='board'?'拖动卡片切换状态':'更改自动保存至本机'} ${hasFilter?'<button class="filter-clear" data-action="clear-filters">清除筛选</button>':''}</span>${mode==='list'?`<div class="pagination"><span>${page} / ${pages}</span><button class="icon-btn" data-page="${page-1}" aria-label="上一页" ${page===1?'disabled':''}>${icon('left')}</button><button class="icon-btn" data-page="${page+1}" aria-label="下一页" ${page===pages?'disabled':''}>${icon('chevron')}</button></div>`:''}</div>`;
+  return bulk+(mode==='board'?board(tasks):`<div class="table-wrap"><table><thead><tr><th><input id="select-all" type="checkbox" aria-label="选择本页全部任务"></th><th class="task-title-cell">任务名称</th><th class="owner-col">负责人</th><th class="priority-col">优先级</th><th class="status-col">状态</th><th class="progress-col">进度</th><th class="date-col">起止时间</th><th class="action-col">操作</th></tr></thead><tbody>${shown.map(taskRow).join('')}</tbody></table></div>`)+`<div class="table-bottom"><span>共 ${tasks.length} 项${hasFilter?' · 已筛选':''} · ${mode==='board'?'拖动卡片切换状态':'更改自动保存至本机'} ${hasFilter?'<button class="filter-clear" data-action="clear-filters">清除筛选</button>':''}</span>${mode==='list'?`<div class="pagination"><span>${page} / ${pages}</span><button class="icon-btn" data-page="${page-1}" aria-label="上一页" ${page===1?'disabled':''}>${icon('left')}</button><button class="icon-btn" data-page="${page+1}" aria-label="下一页" ${page===pages?'disabled':''}>${icon('chevron')}</button></div>`:''}</div>`;
 }
 function taskRow(t) {
   const p=projectOf(t);
-  return `<tr><td><input type="checkbox" data-select="${t.id}" aria-label="选择 ${esc(t.title)}" ${selection.has(t.id)?'checked':''}></td><td><button class="task-title" data-edit-task="${t.id}" title="${esc(t.title)}">${esc(t.title)}</button><div class="task-meta"><span class="project-dot ${p?.color||'violet'}"></span>${esc(p?.name||'未分配项目')}</div></td><td><div class="owner-cell"><span class="owner-avatar">${esc(t.owner.slice(0,1))}</span><span>${esc(t.owner)}</span></div></td><td><span class="priority priority-${t.priority}">${icon('flag')}${priorityNames[t.priority]}</span></td><td><select class="status-pill inline-status status-${t.status}" data-status-task="${t.id}" aria-label="${esc(t.title)}的状态">${Object.keys(statusNames).map(k=>option(k,statusNames[k],t.status)).join('')}</select></td><td><div class="progress-cell"><div class="progress-track"><div class="progress-fill" style="--p:${t.progress}%;--c:${colors[t.status]}"></div></div><span>${t.progress}%</span></div></td><td class="${overdue(t)?'overdue':''}" title="${esc(t.due_date)}">${dayLabel(t.due_date)}${overdue(t)?' · 逾期':''}</td><td><button class="icon-btn" data-edit-task="${t.id}" aria-label="编辑 ${esc(t.title)}">${icon('edit')}</button></td></tr>`;
+  return `<tr><td><input type="checkbox" data-select="${t.id}" aria-label="选择 ${esc(t.title)}" ${selection.has(t.id)?'checked':''}></td><td><button class="task-title" data-edit-task="${t.id}" title="${esc(t.title)}">${esc(t.title)}</button><div class="task-meta"><span class="project-dot ${p?.color||'violet'}"></span>${esc(p?.name||'未分配项目')}</div></td><td><div class="owner-cell"><span class="owner-avatar">${esc(t.owner.slice(0,1))}</span><span>${esc(t.owner)}</span></div></td><td><span class="priority priority-${t.priority}">${icon('flag')}${priorityNames[t.priority]}</span></td><td><select class="status-pill inline-status status-${t.status}" data-status-task="${t.id}" aria-label="${esc(t.title)}的状态">${Object.keys(statusNames).map(k=>option(k,statusNames[k],t.status)).join('')}</select></td><td><div class="progress-cell"><div class="progress-track"><div class="progress-fill" style="--p:${t.progress}%;--c:${colors[t.status]}"></div></div><span>${t.progress}%</span></div></td><td title="${esc(t.start_date||'未设置')} 至 ${esc(t.due_date||'未设置')}"><div class="task-dates"><small>起 ${dayLabel(t.start_date)}</small><span class="${overdue(t)?'overdue':''}">止 ${dayLabel(t.due_date)}${overdue(t)?' · 逾期':''}</span></div></td><td><button class="icon-btn" data-edit-task="${t.id}" aria-label="编辑 ${esc(t.title)}">${icon('edit')}</button></td></tr>`;
 }
 function board(tasks) {
   return `<div class="board">${Object.keys(statusNames).map(k=>`<section class="board-column" data-drop-status="${k}" aria-label="${statusNames[k]}任务"><div class="board-heading"><span class="status-pill status-${k}"><span class="dot"></span>${statusNames[k]}</span><span class="count">${tasks.filter(t=>t.status===k).length}</span><button class="icon-btn" data-new-status="${k}" aria-label="新建${statusNames[k]}任务">${icon('plus')}</button></div>${tasks.filter(t=>t.status===k).map(t=>{const p=projectOf(t);return `<article class="task-card" draggable="true" data-drag-task="${t.id}"><div class="card-top"><div class="task-meta"><span class="project-dot ${p?.color||'violet'}"></span>${esc(p?.name||'未分配')}</div><button class="icon-btn" data-edit-task="${t.id}" aria-label="编辑 ${esc(t.title)}">${icon('edit')}</button></div><button class="task-title" data-edit-task="${t.id}">${esc(t.title)}</button><span class="priority priority-${t.priority}">${icon('flag')}${priorityNames[t.priority]}优先级</span><div class="progress-track"><div class="progress-fill" style="--p:${t.progress}%;--c:${colors[t.status]}"></div></div><div class="card-bottom"><span class="${overdue(t)?'overdue':''}">${dayLabel(t.due_date)}${overdue(t)?' · 逾期':''}</span><span>${t.progress}%</span><span class="owner-avatar" title="${esc(t.owner)}">${esc(t.owner.slice(0,1))}</span></div></article>`;}).join('')||'<div class="board-placeholder">拖动任务到这里<br>或点击 + 添加任务</div>'}</section>`).join('')}</div>`;
@@ -133,7 +144,7 @@ function trend() {
   return `<section class="panel trend-panel"><h3>近 7 天完成记录</h3><div class="trend-chart">${dates.map((d,i)=>`<div class="trend-column"><span>${counts[i]}</span><div class="trend-bar" style="--h:${counts[i]/max*95}px" title="${d} 完成 ${counts[i]} 项"></div><small>${dayLabel(d)}</small></div>`).join('')}</div><p class="trend-note">按当前已完成任务的最近完成时间统计；重新打开或删除任务后，统计相应更新。</p></section>`;
 }
 function settingsPage() {
-  return `<div class="settings-grid"><section class="panel settings-card"><h2>选择你的工作氛围</h2><p>不同的光线，同样的专注。主题设置仅保存在当前浏览器。</p><div class="theme-options">${[['dark','深空紫'],['light','晨光白'],['aurora','极光绿']].map(([k,n])=>`<button class="theme-choice ${document.documentElement.dataset.theme===k?'active':''}" data-theme-choice="${k}"><span class="theme-preview ${k}"></span>${n}</button>`).join('')}</div></section><section class="panel settings-card"><h2>数据备份与恢复</h2><p>导出全部项目和任务为 JSON 备份。恢复备份将替换现有项目与任务，请先导出当前数据。</p><div class="settings-actions"><button class="button primary" data-action="export">${icon('download')}导出备份</button><button class="button secondary" data-action="import">${icon('upload')}恢复备份</button></div></section><section class="panel settings-card"><h2>你的数据，由你掌控</h2><div class="storage-badge">${icon('database')}SQLite · 本地持久化</div><p>当前共有 ${data.projects.length} 个项目、${data.tasks.length} 个任务。数据库位于应用目录的 <code>data/flow.sqlite3</code>，刷新页面、切换主题或重启应用不会丢失已保存内容。</p><button class="button secondary" data-action="refresh">${icon('refresh')}检查连接并刷新</button></section><section class="panel settings-card"><h2>关于这个版本</h2><ul class="security-list"><li>个人使用版，无登录和复杂角色权限。</li><li>服务仅监听本机地址，不开放公网访问。</li><li>不加载第三方脚本，不向外部上传任务数据。</li><li>删除前确认、输入校验、多窗口冲突检测。</li><li>快捷键 N 新建任务，G 返回总览，Esc 关闭窗口。</li></ul></section></div>`;
+  return window.FlowSettings ? window.FlowSettings.page() : '<section class="panel settings-card"><h2>工作空间设置</h2><p>正在加载设置组件，请稍候；若持续显示，请刷新页面。</p></section>';
 }
 function applyTheme(theme) {if(!['dark','light','aurora'].includes(theme))theme='dark';document.documentElement.dataset.theme=theme;try{localStorage.setItem('flow-theme',theme);}catch{}const btn=$('.theme-toggle');btn.innerHTML=icon(theme==='light'?'moon':'sun');btn.setAttribute('aria-label',theme==='light'?'切换深色主题':'切换浅色主题');if(loaded&&section==='settings')render();}
 function confirmAction(title,message) {return new Promise(resolve=>{const d=$('#confirm-dialog');$('#confirm-title').textContent=title;$('#confirm-message').textContent=message;d.returnValue='';d.addEventListener('close',()=>resolve(d.returnValue==='confirm'),{once:true});d.showModal();});}
@@ -164,18 +175,18 @@ async function deleteRecord(type) {
   const form=$(`#${type}-form`),ident=form.elements.id.value;
   const record=data[type+'s'].find(x=>x.id===ident);if(!record)return;
   const name=type==='task'?record.title:record.name;
-  if(type==='project'&&data.tasks.some(t=>t.project_id===ident)){$('#project-error').textContent='项目下仍有任务，请先移动或删除这些任务，再删除项目。';return;}
+  if(type==='project'&&[...data.tasks,...(data.requirements||[]),...(data.defects||[])].some(t=>t.project_id===ident)){$('#project-error').textContent='项目下仍有任务、需求或缺陷，请先移动或删除这些记录，再删除项目。';return;}
   if(!await confirmAction(`删除${type==='task'?'任务':'项目'}`,`确定删除「${name}」？此操作无法撤销。`))return;
   await operation(async()=>{await write(`/api/${type}s/${ident}`,'DELETE',{});$(`#${type}-dialog`).close();},'已删除');
 }
 async function updateStatus(ident,status) {const task=data.tasks.find(t=>t.id===ident);if(!task||task.status===status)return;await operation(()=>write('/api/tasks/'+ident,'PUT',{...task,status,progress:status==='done'?100:Math.min(task.progress,99)}),'状态已更新');render();}
 async function exportBackup() {
-  if(!ready){toast('请先连接数据库');return;}
-  try{const response=await fetch('/api/export');if(!response.ok)throw new Error('备份导出失败');const body=await response.blob();const url=URL.createObjectURL(body),a=document.createElement('a');a.href=url;a.download=`flow-backup-${localDay()}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);toast('备份已生成，请妥善保存下载的 JSON 文件');}catch(e){toast(e.message);}
+  if(window.FlowSettings)return window.FlowSettings.exportBackup('projects');
+  toast('设置组件未加载，请刷新页面');
 }
 async function restoreBackup(file) {
-  if(!file)return;if(file.size>7.5*1024*1024){toast('备份文件不能超过 7.5 MB');return;}
-  try{const backup=JSON.parse(await file.text());if(backup.format!=='flow-backup-v1'||!Array.isArray(backup.projects)||!Array.isArray(backup.tasks))throw new Error('不是有效的 Flow 备份文件');if(!await confirmAction('恢复备份，替换现有数据',`将导入 ${backup.projects.length} 个项目、${backup.tasks.length} 个任务，并替换当前全部项目和任务。请确保已经导出当前备份。是否继续？`))return;await operation(()=>write('/api/restore','POST',{backup}),'备份已恢复');}catch(e){toast(e instanceof SyntaxError?'JSON 文件无法解析，请使用完整备份文件':e.message);}
+  if(window.FlowSettings)return window.FlowSettings.restoreBackup(file);
+  toast('设置组件未加载，请刷新页面');
 }
 document.addEventListener('click',async event=>{
   const button=event.target.closest('button,a');if(!button)return;
@@ -185,7 +196,7 @@ document.addEventListener('click',async event=>{
   if(button.dataset.editTask){openTask(button.dataset.editTask);return;}
   if(button.dataset.editProject){openProject(button.dataset.editProject);return;}
   if(button.dataset.newStatus){openTask(null,button.dataset.newStatus);return;}
-  if(button.dataset.mode){mode=button.dataset.mode;selection.clear();render();return;}
+  if(button.dataset.mode){if(!['list','board','gantt'].includes(button.dataset.mode))return;mode=button.dataset.mode;selection.clear();if(mode==='gantt')window.FlowManagement?.syncTaskFilters();history.replaceState(null,'',routeHash());render();return;}
   if(button.dataset.page){page=Number(button.dataset.page);renderResults();return;}
   if(button.dataset.themeChoice){applyTheme(button.dataset.themeChoice);return;}
   const action=button.dataset.action;
@@ -221,13 +232,13 @@ document.addEventListener('dragover',e=>{const col=e.target.closest('[data-drop-
 document.addEventListener('dragleave',e=>{const col=e.target.closest('[data-drop-status]');if(col&&!col.contains(e.relatedTarget))col.classList.remove('drag-over');});
 document.addEventListener('drop',async e=>{const col=e.target.closest('[data-drop-status]');if(!col||!dragId)return;e.preventDefault();const id=dragId;dragId=null;$$('.drag-over').forEach(x=>x.classList.remove('drag-over'));await updateStatus(id,col.dataset.dropStatus);});
 document.addEventListener('dragend',()=>{dragId=null;$$('.drag-over').forEach(x=>x.classList.remove('drag-over'));});
-document.addEventListener('keydown',event=>{if(event.ctrlKey||event.metaKey||event.altKey||event.target.closest('input,textarea,select,[contenteditable="true"]')||$('dialog[open]'))return;if(event.key.toLowerCase()==='n'){event.preventDefault();openTask();}if(event.key.toLowerCase()==='g')route('overview');});
+document.addEventListener('keydown',event=>{if(event.ctrlKey||event.metaKey||event.altKey||event.target.closest('input,textarea,select,[contenteditable="true"]')||$('dialog[open]'))return;if(event.key.toLowerCase()==='n'){event.preventDefault();if(['requirements','defects'].includes(section)&&window.FlowManagement)window.FlowManagement.open(section);else openTask();}if(event.key.toLowerCase()==='g')route('overview');});
 $('#task-form').addEventListener('submit',e=>saveForm(e,'task'));
 $('#project-form').addEventListener('submit',e=>saveForm(e,'project'));
 $('#delete-task').addEventListener('click',()=>deleteRecord('task'));
 $('#delete-project').addEventListener('click',()=>deleteRecord('project'));
 $$('.editor-dialog').forEach(d=>d.addEventListener('cancel',e=>{if(busy)e.preventDefault();}));
-window.addEventListener('hashchange',()=>{hydrateRoute();filters=initialFilters();page=1;selection.clear();if(loaded)render();});
+window.addEventListener('hashchange',()=>{hydrateRoute();filters=initialFilters();page=1;selection.clear();window.FlowManagement?.reset();if(loaded)render();});
 window.addEventListener('storage',e=>{if(e.key==='flow-theme')applyTheme(e.newValue);});
 fillIcons();try{applyTheme(localStorage.getItem('flow-theme')||'dark');}catch{applyTheme('dark');}
 hydrateRoute();load(true);

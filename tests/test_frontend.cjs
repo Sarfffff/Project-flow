@@ -24,6 +24,7 @@ const context = vm.createContext({document,console,setTimeout,clearTimeout,Date,
 });
 const bootstrap = source.lastIndexOf('fillIcons();try');
 assert(bootstrap > 0);
+vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'src', 'settings.js'), 'utf8'), context);
 vm.runInContext(source.slice(0, bootstrap), context);
 let count = 0;
 function test(name, code) {

@@ -1,16 +1,24 @@
 from __future__ import annotations
 
 import argparse
+import getpass
+from functools import wraps
+from storage_settings import StorageSettings
+from management import ManagementStore
+import github_api
 import json
 import logging
 import os
 import re
+import socket
 import sqlite3
+import sys
+from workspace_backup import WorkspaceBackups, MAX_BACKUP
 import uuid
 from datetime import date, datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = ROOT.parent
@@ -19,11 +27,30 @@ STATUSES = ('todo', 'doing', 'review', 'done')
 PRIORITIES = ('low', 'medium', 'high', 'urgent')
 COLORS = ('violet', 'blue', 'green', 'amber', 'pink')
 MAX_BODY = 8 * 1024 * 1024
+BACKUPS = WorkspaceBackups(sys.modules[__name__])
+MANAGEMENT = ManagementStore(sys.modules[__name__])
 
 
 class Invalid(Exception):
     def __init__(self, message, status=400):
         self.message, self.status = message, status
+
+
+STORAGE = StorageSettings(sys.modules[__name__])
+
+
+def storage_guard(fn):
+    @wraps(fn)
+    def guarded(self):
+        path = urlsplit(self.path).path
+        if not path.startswith('/api/') or path == '/api/storage/pick':
+            return fn(self)
+        try:
+            with STORAGE.gate.access(exclusive=path in ('/api/storage/migrate', '/api/github/session')):
+                return fn(self)
+        except Invalid as error:
+            return self.send(error.status, {'error': error.message})
+    return guarded
 
 
 def now():
@@ -70,6 +97,9 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS tasks_project ON tasks(project_id);
         ''')
+        github_api.init_db(db)
+        MANAGEMENT.init_db(db)
+        BACKUPS.init_db(db)
 
 
 def text(data, key, maximum, required=False):
@@ -140,44 +170,16 @@ def snapshot(db):
     return dict(revision=db.execute('SELECT revision FROM meta WHERE id=1').fetchone()[0],
                 projects=[dict(r) for r in db.execute('SELECT * FROM projects ORDER BY created_at,id')],
                 tasks=[dict(r) for r in db.execute('SELECT * FROM tasks ORDER BY created_at DESC,id')],
-                activities=[dict(r) for r in db.execute('SELECT * FROM activities ORDER BY id DESC LIMIT 50')])
+                activities=[dict(r) for r in db.execute('SELECT * FROM activities ORDER BY id DESC LIMIT 50')],
+                **MANAGEMENT.snapshot(db))
 
 
 def mutate(db, method, path, data):
     stamp = now()
     if path == '/api/restore' and method == 'POST':
-        backup = data.get('backup')
-        if not isinstance(backup, dict) or backup.get('format') != 'flow-backup-v1':
-            raise Invalid('请选择 Flow 导出的 JSON 备份文件')
-        projects, tasks = backup.get('projects'), backup.get('tasks')
-        if not isinstance(projects, list) or not isinstance(tasks, list) or len(projects) > 1000 or len(tasks) > 20000:
-            raise Invalid('备份结构无效或超出容量（1000 项目、20000 任务）')
-        db.execute('DELETE FROM tasks')
-        db.execute('DELETE FROM projects')
-        seen = set()
-        for p in projects:
-            if not isinstance(p, dict):
-                raise Invalid('备份中的项目格式无效')
-            ident = text(p, 'id', 64, True)
-            if not re.fullmatch(r'[a-zA-Z0-9_-]+', ident) or ident in seen:
-                raise Invalid('备份包含无效或重复的项目 ID')
-            seen.add(ident)
-            values = project_values(p)
-            insert(db, 'projects', dict(id=ident, **values, created_at=timestamp(p.get('created_at'), stamp), updated_at=stamp))
-        seen = set()
-        for t in tasks:
-            if not isinstance(t, dict):
-                raise Invalid('备份中的任务格式无效')
-            ident = text(t, 'id', 64, True)
-            if not re.fullmatch(r'[a-zA-Z0-9_-]+', ident) or ident in seen:
-                raise Invalid('备份包含无效或重复的任务 ID')
-            seen.add(ident)
-            values = task_values(t, db)
-            completed = timestamp(t.get('completed_at'), stamp) if values['status'] == 'done' else None
-            insert(db, 'tasks', dict(id=ident, **values, created_at=timestamp(t.get('created_at'), stamp), updated_at=stamp, completed_at=completed))
-        db.execute('DELETE FROM activities')
-        activity(db, f'恢复备份：{len(projects)} 个项目、{len(tasks)} 个任务')
-        return
+        return BACKUPS.restore(db, data.get('backup'))
+    if re.match(r'/api/(requirements|defects)(?:/|$)', path):
+        return MANAGEMENT.mutate(db, method, path, data)
     if path == '/api/tasks/bulk' and method == 'POST':
         ids = data.get('ids')
         if not isinstance(ids, list) or not ids or len(ids) > 1000 or any(not isinstance(i, str) for i in ids):
@@ -219,8 +221,8 @@ def mutate(db, method, path, data):
         raise Invalid('记录不存在', 404)
     label = old['name'] if table == 'projects' else old['title']
     if method == 'DELETE':
-        if table == 'projects' and db.execute('SELECT 1 FROM tasks WHERE project_id=? LIMIT 1', (ident,)).fetchone():
-            raise Invalid('项目下仍有任务，请先移动或删除这些任务', 409)
+        if table == 'projects' and (db.execute('SELECT 1 FROM tasks WHERE project_id=? LIMIT 1', (ident,)).fetchone() or MANAGEMENT.project_in_use(db, ident)):
+            raise Invalid('项目下仍有任务、需求或缺陷，请先移动或删除这些记录', 409)
         db.execute(f'DELETE FROM {table} WHERE id=?', (ident,))
         activity(db, f'删除{"项目" if table == "projects" else "任务"}「{label}」')
         return
@@ -246,6 +248,15 @@ def timestamp(value, fallback):
         raise Invalid('备份中的时间戳无效')
 
 
+class FlowHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = False
+
+    def server_bind(self):
+        if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = 'Flow/1.0'
 
@@ -264,14 +275,44 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def github_read(self):
+        try:
+            if self.headers.get('X-Flow-Request') != '1' or self.headers.get('Sec-Fetch-Site') == 'cross-site':
+                raise github_api.GitHubError('请求来源校验失败', 403)
+            parsed = urlsplit(self.path)
+            query = {k: v[-1] for k, v in parse_qs(parsed.query, keep_blank_values=True).items()}
+            with connect() as db:
+                result = github_api.read(db, parsed.path.removeprefix('/api/github/'), query)
+            return self.send(200, result)
+        except github_api.GitHubError as error:
+            return self.send(error.status, {'error': error.message})
+        except Exception:
+            return self.send(500, {'error': 'GitHub 集成操作失败，请刷新后重试'})
+
+    def log_message(self, format, *args):
+        if urlsplit(self.path).path.startswith('/api/github/'):
+            return
+        super().log_message(format, *args)
+
+    @storage_guard
     def do_GET(self):
         path = urlsplit(self.path).path
+        if path.startswith('/api/github/'):
+            return self.github_read()
+        if path == '/api/workspace-status':
+            try:
+                self.require_local_request()
+                with connect() as db:
+                    db.execute('BEGIN')
+                    state = BACKUPS.status(db)
+                return self.send(200, state)
+            except Invalid as error:
+                return self.send(error.status, {'error': error.message})
         if path in ('/api/state', '/api/export'):
             with connect() as db:
                 db.execute('BEGIN')
-                state = snapshot(db)
+                state = BACKUPS.pack(db) if path == '/api/export' else snapshot(db)
             if path == '/api/export':
-                state = dict(format='flow-backup-v1', exported_at=now(), projects=state['projects'], tasks=state['tasks'])
                 return self.send(200, state, extra={'Content-Disposition': 'attachment; filename="flow-backup.json"'})
             return self.send(200, state)
         if path == '/api/health':
@@ -282,6 +323,12 @@ class Handler(BaseHTTPRequestHandler):
                  '/project-flow/index.html': ('index.html', 'text/html; charset=utf-8'),
                  '/project-flow/styles.css': ('styles.css', 'text/css; charset=utf-8'),
                  '/project-flow/app.js': ('app.js', 'text/javascript; charset=utf-8'),
+                 '/project-flow/management.js': ('management.js', 'text/javascript; charset=utf-8'),
+                 '/project-flow/management.css': ('management.css', 'text/css; charset=utf-8'),
+                 '/project-flow/github.js': ('github.js', 'text/javascript; charset=utf-8'),
+                 '/project-flow/settings.js': ('settings.js', 'text/javascript; charset=utf-8'),
+                 '/project-flow/settings.css': ('settings.css', 'text/css; charset=utf-8'),
+                 '/project-flow/github.css': ('github.css', 'text/css; charset=utf-8'),
                  '/project-flow/favicon.svg': ('favicon.svg', 'image/svg+xml')}
         if path not in files:
             return self.send(404, {'error': '页面不存在'})
@@ -291,17 +338,26 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             self.send(500, {'error': '应用资源缺失'})
 
+    def require_local_request(self):
+        if self.headers.get('X-Flow-Request') != '1' or self.headers.get('Sec-Fetch-Site') == 'cross-site':
+            raise Invalid('请求来源校验失败', 403)
+        origin = self.headers.get('Origin')
+        if origin and (urlsplit(origin).scheme not in ('http', 'https') or urlsplit(origin).netloc != self.headers.get('Host')):
+            raise Invalid('请求来源校验失败，请在项目页面操作', 403)
+
+    @storage_guard
     def write_request(self):
         try:
-            if self.headers.get('X-Flow-Request') != '1' or self.headers.get('Sec-Fetch-Site') == 'cross-site':
-                raise Invalid('请求来源校验失败', 403)
+            self.require_local_request()
             if self.headers.get('Content-Type', '').split(';')[0] != 'application/json':
                 raise Invalid('需要 JSON 格式请求', 415)
             try:
                 size = int(self.headers.get('Content-Length', '0'))
             except ValueError:
                 raise Invalid('请求长度无效')
-            if not 0 < size <= MAX_BODY:
+            request_path = urlsplit(self.path).path
+            limit = MAX_BACKUP + 1024 * 1024 if request_path in ('/api/restore', '/api/restore/preview') else MAX_BODY
+            if not 0 < size <= limit:
                 raise Invalid('请求过大或为空', 413)
             try:
                 data = json.loads(self.rfile.read(size))
@@ -309,16 +365,58 @@ class Handler(BaseHTTPRequestHandler):
                 raise Invalid('JSON 格式无效')
             if not isinstance(data, dict):
                 raise Invalid('请求必须是 JSON 对象')
+            request_path = urlsplit(self.path).path
+            if request_path == '/api/storage/pick' and self.command == 'POST':
+                return self.send(200, STORAGE.pick_folder())
+            if request_path == '/api/storage/migrate' and self.command == 'POST':
+                return self.send(200, STORAGE.migrate(data))
+            if request_path == '/api/backups/export' and self.command == 'POST':
+                with connect() as db:
+                    db.execute('BEGIN IMMEDIATE')
+                    scope = data.get('scope', 'projects')
+                    backup = BACKUPS.pack(db, scope)
+                    raw = BACKUPS.encode(backup)
+                    BACKUPS.remember(db, 'last_export_at', backup['exported_at'])
+                    BACKUPS.remember(db, 'last_export_scope', scope)
+                return self.send(200, raw, extra={'Content-Disposition': 'attachment; filename="flow-backup.json"'})
+            if request_path == '/api/restore/preview' and self.command == 'POST':
+                with connect() as db:
+                    db.execute('BEGIN')
+                    result = BACKUPS.preview(db, data.get('backup'))
+                return self.send(200, result)
+            if request_path == '/api/workspace-verify' and self.command == 'POST':
+                with connect() as db:
+                    account = github_api.status(db)
+                if account['token_configured']:
+                    profile, _ = github_api.request('/user')
+                    verified_login = github_api.login_name(profile['login'])
+                    matches = not account['login'] or verified_login.casefold() == account['login'].casefold()
+                    message = ('令牌账号验证成功：' + verified_login + '；仓库权限需在工作台逐个确认') if matches else '令牌账号与已保存账号不同，请前往 GitHub 工作台重新连接'
+                elif account['login']:
+                    profile, _ = github_api.request('/users/' + github_api.login_name(account['login']))
+                    matches = profile.get('type') == 'User'
+                    message = '公开账号可访问；未验证私有仓库授权' if matches else '当前配置不是个人账号'
+                else:
+                    raise Invalid('请先在 GitHub 工作台连接账号')
+                return self.send(200, dict(ok=matches, message=message, checked_at=now()))
+            if request_path.startswith('/api/github/'):
+                with connect() as db:
+                    result = github_api.write(db, request_path.removeprefix('/api/github/'), self.command, data)
+                return self.send(200, result)
             with connect() as db:
                 db.execute('BEGIN IMMEDIATE')
                 revision = db.execute('SELECT revision FROM meta WHERE id=1').fetchone()[0]
                 if self.headers.get('If-Match') != str(revision):
                     raise Invalid('数据已在其他页面更新，请刷新后重试；本次更改尚未保存', 409)
-                mutate(db, self.command, urlsplit(self.path).path, data)
+                restore_result = mutate(db, self.command, request_path, data)
                 db.execute('UPDATE meta SET revision=revision+1 WHERE id=1')
                 state = snapshot(db)
+                if request_path == '/api/restore':
+                    state['restore_result'] = restore_result
+            if request_path == '/api/restore':
+                github_api.READ_CACHE.clear()
             self.send(200, state)
-        except Invalid as error:
+        except (Invalid, github_api.GitHubError) as error:
             self.send(error.status, {'error': error.message})
         except sqlite3.Error:
             logging.exception('Database error')
@@ -334,11 +432,20 @@ def main():
     global DATABASE
     parser = argparse.ArgumentParser(description='Flow local project manager')
     parser.add_argument('--port', type=int, default=58061)
-    parser.add_argument('--db', type=Path, default=DATABASE)
+    parser.add_argument('--db', type=Path, default=None)
+    parser.add_argument('--github-login', action='store_true', help='Securely prompt for a GitHub read-only token; held in process memory only')
     args = parser.parse_args()
-    DATABASE = args.db.resolve()
+    if args.github_login:
+        token = getpass.getpass('GitHub read-only token (hidden, memory only): ').strip()
+        if not re.fullmatch(r'[A-Za-z0-9_]{20,255}', token):
+            parser.error('Token format is invalid')
+        github_api.TOKEN = token
+    try:
+        DATABASE = args.db.resolve() if args.db else STORAGE.load(DATABASE)
+    except Invalid as error:
+        parser.error(error.message)
     init_db()
-    server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
+    server = FlowHTTPServer(('127.0.0.1', args.port), Handler)
     print(f'Flow running at http://127.0.0.1:{args.port}/project-flow/', flush=True)
     print(f'Database: {DATABASE}', flush=True)
     try:

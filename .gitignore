@@ -7,6 +7,9 @@
 *.sqlite3-*
 *.db-*
 flow-backup*.json
+flow-workspace*.json
+*.backups/
+before-restore-*.json
 /backups/
 
 # Third-party tutorial materials retained locally only

@@ -21,7 +21,7 @@ class ApiTest(unittest.TestCase):
         cls.temp_directory = tempfile.TemporaryDirectory(prefix='flow-api-', dir=Path(__file__).resolve().parent)
         cls.addClassCleanup(cls.temp_directory.cleanup)
         cls.temp = Path(cls.temp_directory.name)
-        cls.http = ThreadingHTTPServer(('127.0.0.1', 58061), server.Handler)
+        cls.http = server.FlowHTTPServer(('127.0.0.1', 58061), server.Handler)
         cls.addClassCleanup(cls.http.server_close)
         cls.thread = threading.Thread(target=cls.http.serve_forever, daemon=True)
         cls.thread.start()
